@@ -75,6 +75,18 @@ impl ParsedDocument {
     pub fn input_buffer(&self) -> &Option<String> {
         &self.owned_buffer
     }
+
+    /// pointer
+    pub fn pointer<'a>(&self, key: &str, f: impl FnOnce(&Value)) {
+        let key_iter = key.split("/").skip(1);
+        self.content.items().next().unwrap().pointer(key_iter, f);
+    }
+
+    /// pointer_mut
+    pub fn pointer_mut<'a>(&mut self, key: &str, f: impl FnOnce(&mut Value)) {
+        let key_iter = key.split("/").skip(1);
+        self.content.items_mut().next().unwrap().pointer_mut(key_iter, f);
+    }
 }
 
 /// Represents the variations of allowable comments.
@@ -196,6 +208,7 @@ impl Comments {
 
 /// A struct used for capturing comments at the end of an JSON5 array or object, which are not
 /// associated to any of the Values contained in the array/object.
+#[derive(Clone)]
 pub(crate) struct ContainedComments {
     /// Parsed comments to be applied to the next Value, when reached.
     /// If there are any pending comments after the last item, they are written after the last
@@ -294,6 +307,7 @@ impl ContainedComments {
 /// line comment and comments appearing immediately before the value). For `Object` and `Array`,
 /// comments appearing at the end of the the structure are encapsulated inside the appropriate
 /// specialized struct.
+#[derive(Clone)]
 pub enum Value {
     /// Represents a non-recursive data type (string, bool, number, or "null") and its associated
     /// comments.
@@ -381,6 +395,58 @@ impl Value {
         let comments = self.comments();
         comments.before_value().len() > 0 || comments.end_of_line().is_some()
     }
+
+    /// pointer
+    pub fn pointer<'a>(&self, mut key_iter: impl Iterator<Item = &'a str>, f: impl FnOnce(&Value)) {
+        if let Some(key) = key_iter.next() {
+            match self {
+                Value::Object { ref val, .. } => {
+                    if let Some(p) = val.properties().find(|p| p.name() == key) {
+                        p.value().pointer(key_iter, f);
+                    }
+                }
+                Value::Array { ref val, .. } => {
+                    let key: usize = key.parse().unwrap();
+                    if let Some(item) = val.items().nth(key) {
+                        item.pointer(key_iter, f);
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            f(self);
+        }
+    }
+
+    /// pointer_mut
+    pub fn pointer_mut<'a>(
+        &mut self,
+        mut key_iter: impl Iterator<Item = &'a str>,
+        f: impl FnOnce(&mut Value),
+    ) {
+        if let Some(key) = key_iter.next() {
+            match self {
+                Value::Object { ref mut val, .. } => {
+                    if let Some(p) = val.properties_mut().find(|p| p.name() == key) {
+                        p.value_mut().pointer_mut(key_iter, f);
+                    } else {
+                        // TODO: Add a new Value for the missing key and call "f".
+                    }
+                }
+                Value::Array { ref mut val, .. } => {
+                    let key: usize = key.parse().unwrap();
+                    if let Some(mut item) = val.items_mut().nth(key) {
+                        item.pointer_mut(key_iter, f);
+                    } else {
+                        // TODO: Add a new Value for the missing key and call "f".
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            f(self);
+        }
+    }
 }
 
 impl std::fmt::Debug for Value {
@@ -397,6 +463,7 @@ impl std::fmt::Debug for Value {
 /// Represents a primitive value in a JSON5 object property or array item.
 /// The parsed value is stored as a formatted string, retaining its original format,
 /// and written to the formatted document just as it appeared.
+#[derive(Clone)]
 pub struct Primitive {
     value_string: String,
 }
@@ -489,6 +556,7 @@ pub(crate) trait Container {
 /// transferred to the next parsed item. After the last item, if any other comments are encountered,
 /// those comments are retained in the contained_comments field, to be restored during formatting,
 /// after writing the last item.
+#[derive(Clone)]
 pub struct Array {
     /// The array items.
     items: Vec<Rc<RefCell<Value>>>,
@@ -698,6 +766,7 @@ impl std::fmt::Debug for Property {
 
 /// A specialized struct to represent the data of JSON5 object, including any comments placed at
 /// the end of the object.
+#[derive(Clone)]
 pub struct Object {
     /// Parsed property name to be applied to the next upcoming Value.
     pending_property_name: Option<String>,
@@ -891,4 +960,15 @@ impl std::fmt::Debug for Object {
             if self.properties.len() == 1 { "y" } else { "ies" }
         )
     }
+}
+
+#[test]
+fn test_pointer() {
+    let doc = ParsedDocument::from_str("{}", None).unwrap();
+    let mut mut_doc = doc.clone();
+    mut_doc.pointer_mut("/a/b/c", |c| {
+        doc.pointer("/a/b", |b| {
+            *c = b.clone();
+        });
+    });
 }
